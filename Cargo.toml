@@ -5,3 +5,6 @@ edition = "2021"
 
 [dependencies]
 hash32 = "0.3.1"
+
+[dev-dependencies]
+rand = "0.8.5"

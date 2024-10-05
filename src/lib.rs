@@ -3,16 +3,16 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use core::cmp::Ordering;
-use core::fmt;
 use core::fmt::Formatter;
 use core::hash::Hash;
+use core::mem::size_of;
 use core::ops::Add;
+use core::{fmt, ptr::NonNull};
 use hash32::{FnvHasher, Hasher};
 
 const MAGIC: [u8; 8] = [0x61, 0x74, 0x74, 0x6F, 0x62, 0x79, 0x74, 0x65];
 
-struct LiteTree<'tree>(Inner<'tree>);
+struct Tree<'tree>(Inner<'tree>);
 
 enum Inner<'tree> {
     Ref(&'tree mut [u8]),
@@ -28,7 +28,7 @@ macro_rules! debugprint {
     };
 }
 
-impl<'tree> LiteTree<'tree> {
+impl<'tree> Tree<'tree> {
     const MIN_BUF_SIZE: usize = size_of::<Header>() + size_of::<Node>();
 
     pub fn new() -> Self {
@@ -37,7 +37,9 @@ impl<'tree> LiteTree<'tree> {
             magic: MAGIC,
             version: Version::default(),
             depth: 1,
-            root_offset: unsafe { U24::try_from(size_of::<Header>()).unwrap_unchecked() },
+            root_offset: unsafe {
+                U24::try_from(core::mem::size_of::<Header>()).unwrap_unchecked()
+            },
             leak: U24::default(),
         };
         buf.extend_from_slice(header.as_bytes());
@@ -47,7 +49,7 @@ impl<'tree> LiteTree<'tree> {
 
         debugprint!("{:?}", buf);
 
-        LiteTree(Inner::Vec(buf))
+        Tree(Inner::Vec(buf))
     }
 
     pub fn from_bytes(bytes: &'tree mut [u8]) -> Result<Self> {
@@ -64,16 +66,16 @@ impl<'tree> LiteTree<'tree> {
         // TODO: Validate
         // Follow the path down every node, checking every offset fits within the source data.
 
-        Ok(LiteTree(Inner::Ref(bytes)))
+        Ok(Tree(Inner::Ref(bytes)))
     }
 
     pub unsafe fn from_bytes_unchecked(bytes: &'tree mut [u8]) -> Self {
-        LiteTree(Inner::Ref(bytes))
+        Tree(Inner::Ref(bytes))
     }
 
     pub fn get(&self, key: &[u8]) -> Option<&[u8]> {
         let key_hash = hash_key(key);
-        let key_location = self._find_key(key, key_hash, None);
+        let key_location = self._find_key(key, key_hash);
 
         let KeyLocation {
             node_offset,
@@ -83,8 +85,7 @@ impl<'tree> LiteTree<'tree> {
 
         if matches!(status, KeyStatus::Matched) {
             let node = unsafe { self.get_node(node_offset) };
-            let entry_offset = node.kv_offset[entry_index];
-
+            let entry_offset = unsafe { node.as_ref() }.kv_offset[entry_index];
             let entry = unsafe { self.get_entry(entry_offset) };
             Some(entry.val())
         } else {
@@ -93,10 +94,9 @@ impl<'tree> LiteTree<'tree> {
     }
 
     pub fn insert(&mut self, key: &[u8], value: &[u8]) {
-        let mut path = Vec::with_capacity(self.header().depth as usize);
         let key_hash = hash_key(key);
 
-        let key_location = self._find_key(key, key_hash, Some(&mut path));
+        let key_location = self._find_key(key, key_hash);
 
         debugprint!("Found suitable key location {:?}", key_location);
 
@@ -108,30 +108,25 @@ impl<'tree> LiteTree<'tree> {
 
         match status {
             KeyStatus::Empty => {
-                self.insert_new_entry(node_offset, entry_index, key, key_hash, value, &mut path)
+                self.insert_new_entry(node_offset, entry_index, key, key_hash, value)
             }
             KeyStatus::Matched => self.update_existing_entry(node_offset, entry_index, value),
             KeyStatus::RequiresShift => {
-                self.insert_new_and_shift(node_offset, entry_index, key, key_hash, value, &mut path)
+                self.insert_new_and_shift(node_offset, entry_index, key, key_hash, value)
             }
         }
     }
 
     /// Return the Node and Entry Index where a given key either exists or should be inserted.
-    fn _find_key(&self, key: &[u8], key_hash: U24, mut path: Option<&mut Vec<U24>>) -> KeyLocation {
+    fn _find_key(&self, key: &[u8], key_hash: U24) -> KeyLocation {
         let mut current_node_offset = self.header().root_offset;
 
-        // TODO: This is incorrect, internal nodes can contain keys.
-        // The only time an internal node might not contain any keys is when root node is split.
-        // Iterate over all internal nodes (0..depth - 1), which don't contain keys
-        // All leaf nodes are at the same depth, so this works.
-        for _ in 0..self.header().depth {
-            if let Some(ref mut path) = path {
-                path.push(current_node_offset)
-            }
+        debugprint!("Searching for hash {key_hash}");
 
-            let node = unsafe { self.get_node(current_node_offset) };
-            debugprint!("Searching (offset={current_node_offset}) {node:?}");
+        // Iterate over internal nodes (which don't have entries) to arrive at the right leaf node.
+        for _ in 1..self.header().depth {
+            let node = unsafe { self.get_node(current_node_offset).as_ref() };
+            debugprint!("Searching (offset={current_node_offset}) Internal {node:?}");
             let len = node.len as usize;
 
             let mut found_child = false;
@@ -139,80 +134,62 @@ impl<'tree> LiteTree<'tree> {
             for i in 0..len {
                 let entry_hash = node.hashes[i];
 
-                match entry_hash.cmp(&key_hash) {
-                    Ordering::Less => {
-                        debugprint!("Entry Hash < Search Hash, continue");
-                        continue;
-                    }
-                    Ordering::Equal => {
-                        debugprint!("Leaf Node: Entry Hash == Search Hash, check keys");
-                        let entry = unsafe { self.get_entry(node.kv_offset[i]) };
-                        // In the case of hash collisions, we order by key.
-                        match entry.key().cmp(key) {
-                            Ordering::Less => {
-                                debugprint!("Entry Key < Search Key, continue");
-                                continue;
-                            }
-                            Ordering::Equal => {
-                                debugprint!("Entry Key == Search Key, return match");
-                                return KeyLocation {
-                                    node_offset: current_node_offset,
-                                    entry_index: i,
-                                    status: KeyStatus::Matched,
-                                };
-                            }
-                            Ordering::Greater if node.is_leaf() => {
-                                debugprint!("Leaf Node: Entry Key > Search Key, insert with shift");
-                                return KeyLocation {
-                                    node_offset: current_node_offset,
-                                    entry_index: i,
-                                    status: KeyStatus::RequiresShift,
-                                }
-                            }
-                            Ordering::Greater => {
-                                debugprint!("Internal Node: Entry Key > Search Key, move to child");
-                                current_node_offset = node.children_offset[i];
-                                found_child = true;
-                                break;
-                            }
-                        }
-                    }
-                    Ordering::Greater if node.is_leaf() => {
-                        debugprint!("Leaf Node: Entry Key > Search Key, insert with shift");
-                        return KeyLocation {
-                            node_offset: current_node_offset,
-                            entry_index: i,
-                            status: KeyStatus::RequiresShift,
-                        }
-                    }
-                    Ordering::Greater => {
-                        debugprint!("Internal Node: Entry Key > Search Key, move to child");
-                        current_node_offset = node.children_offset[i];
-                        found_child = true;
-                        break;
-                    }
+                if entry_hash >= key_hash {
+                    debugprint!("Entry Hash >= Key Hash; moving to child");
+                    current_node_offset = node.children_offset[i];
+                    found_child = true;
+                    break;
                 }
             }
-            
-            // If we reached this point, all keys were less than the search key.
-            
-            if node.is_leaf() {
-                // If all entry hashes were < search hash, the key location is 1 past the end.
-                debugprint!("Leaf Node: All Entries < Search, append after end");
-                return KeyLocation {
-                    node_offset: current_node_offset,
-                    entry_index: len,
-                    status: KeyStatus::Empty,
-                };
-            }
-            
+
             if !found_child {
-                debugprint!("Internal Node: All Entries < Search, move to rightmost");
-                // If all hashes in this node were < search hash, move to rightmost child
+                debugprint!("All Entry Hash < Key Hash; moving to rightmost child");
+                // Move to the rightmost child
                 current_node_offset = node.children_offset[len];
             }
         }
-        unreachable!("Should find suitable key location in loop");
+
+        let node = unsafe { self.get_node(current_node_offset).as_ref() };
+        debugprint!("Searching (offset={current_node_offset}) Leaf {node:?}");
+        let len = node.len as usize;
+
+        for i in 0..len {
+            let entry_hash = node.hashes[i];
+
+            if entry_hash == key_hash {
+                debugprint!("Entry Hash == Key Hash; comparing keys");
+                let entry = unsafe { self.get_entry(node.kv_offset[i]) };
+                if entry.key() == key {
+                    debugprint!("Entry Key == Key; returning match");
+                    return KeyLocation {
+                        node_offset: current_node_offset,
+                        entry_index: i,
+                        status: KeyStatus::Matched,
+                    };
+                } else if entry.key() > key {
+                    debugprint!("Entry Key > Key; insert with shift");
+                    return KeyLocation {
+                        node_offset: current_node_offset,
+                        entry_index: i,
+                        status: KeyStatus::RequiresShift,
+                    };
+                }
+            } else if entry_hash > key_hash {
+                debugprint!("Entry Hash > Key Hash; insert with shift");
+                return KeyLocation {
+                    node_offset: current_node_offset,
+                    entry_index: i,
+                    status: KeyStatus::RequiresShift,
+                };
+            }
+        }
+
+        debugprint!("All keys < Key; insert after end");
+        KeyLocation {
+            node_offset: current_node_offset,
+            entry_index: len,
+            status: KeyStatus::Empty,
+        }
     }
 
     fn insert_new_entry(
@@ -222,17 +199,18 @@ impl<'tree> LiteTree<'tree> {
         key: &[u8],
         key_hash: U24,
         value: &[u8],
-        path: &mut Vec<U24>,
     ) {
         let new_offset = self.new_entry(key, value);
-        let node = unsafe { self.get_node_mut(node_offset) };
+        let node = unsafe { self.get_node(node_offset) };
 
-        let (node, entry_index) = if node.has_space() {
+        let (mut node, entry_index) = if unsafe { node.as_ref() }.has_space() {
             (node, entry_index)
         } else {
-            self.split_node(node_offset, entry_index, path)
+            let (node_offset, entry_index) = self.split_node(node, node_offset, entry_index);
+            (unsafe { self.get_node(node_offset) }, entry_index)
         };
 
+        let node = unsafe { node.as_mut() };
         node.kv_offset[entry_index] = new_offset;
         node.hashes[entry_index] = key_hash;
         node.len += 1;
@@ -245,18 +223,20 @@ impl<'tree> LiteTree<'tree> {
         key: &[u8],
         key_hash: U24,
         value: &[u8],
-        path: &mut Vec<U24>,
     ) {
         let new_offset = self.new_entry(key, value);
-        let node = unsafe { self.get_node_mut(node_offset) };
+        let node = unsafe { self.get_node(node_offset) };
 
-        let (node, entry_index) = if node.has_space() {
+        let (mut node, entry_index) = if unsafe { node.as_ref() }.has_space() {
             (node, entry_index)
         } else {
-            self.split_node(node_offset, entry_index, path)
+            let (node_offset, entry_index) = self.split_node(node, node_offset, entry_index);
+            (unsafe { self.get_node(node_offset) }, entry_index)
         };
 
-        for i in (entry_index + 1..=node.len as usize).rev() {
+        let node = unsafe { node.as_mut() };
+
+        for i in (entry_index + 1..node.len as usize + 1).rev() {
             node.kv_offset[i] = node.kv_offset[i - 1];
             node.hashes[i] = node.hashes[i - 1];
         }
@@ -270,7 +250,7 @@ impl<'tree> LiteTree<'tree> {
     /// size, just update it. If the value would overflow, create a new [`Entry`]
     fn update_existing_entry(&mut self, node_offset: U24, entry_index: usize, value: &[u8]) {
         let entry_offset = {
-            let node = unsafe { self.get_node(node_offset) };
+            let node = unsafe { self.get_node(node_offset).as_ref() };
             node.kv_offset[entry_index]
         };
         let key: &[u8];
@@ -286,7 +266,7 @@ impl<'tree> LiteTree<'tree> {
             }
         }
         let new_offset = self.new_entry(key, value);
-        let node = unsafe { self.get_node_mut(node_offset) };
+        let node = unsafe { self.get_node(node_offset).as_mut() };
         node.kv_offset[entry_index] = new_offset;
     }
 
@@ -301,79 +281,171 @@ impl<'tree> LiteTree<'tree> {
     // keeps itself balanced.
     fn split_node(
         &mut self,
+        node: NonNull<Node>,
         node_offset: U24,
         target_index: usize,
-        path: &mut Vec<U24>,
-    ) -> (&mut Node, usize) {
-        // TODO: The split needs to propagate up?
-
-        let mut left_hashes: [U24; 19] = [U24::default(); 19];
-        let mut right_hashes: [U24; 19] = [U24::default(); 19];
-
-        let mut left_kv_offsets: [U24; 19] = [U24::default(); 19];
-        let mut right_kv_offsets: [U24; 19] = [U24::default(); 19];
-
-        {
-            let node = unsafe { self.get_node(node_offset) };
-            debugprint!("Split node: {node:?}");
-            left_hashes[0..10].copy_from_slice(&node.hashes[0..10]);
-            right_hashes[0..9].copy_from_slice(&node.hashes[10..19]);
-            left_kv_offsets[0..10].copy_from_slice(&node.kv_offset[0..10]);
-            right_kv_offsets[0..9].copy_from_slice(&node.kv_offset[10..19]);
+    ) -> (U24, usize) {
+        if unsafe { node.as_ref() }.is_root() {
+            return self.split_root(node, node_offset, target_index);
         }
 
-        let left_offset = self.offset();
-        let left_node = {
-            let left_node = self.new_node();
-            left_node.parent_offset = node_offset;
-            left_node.len = 10;
-            left_node.hashes = left_hashes;
-            left_node.kv_offset = left_kv_offsets;
-            unsafe { &*core::ptr::from_ref(left_node) }
+        debugprint!("SPLIT {:?}", unsafe { node.as_ref() });
+
+        let (parent_node_offset, parent_target_index) = {
+            let node = unsafe { node.as_ref() };
+            let parent_node = unsafe { self.get_node(node.parent_offset) };
+            debugprint!("SPLIT PARENT BEFORE {:?}", unsafe { parent_node.as_ref() });
+
+            if unsafe { parent_node.as_ref() }.has_space() {
+                (node.parent_offset, node.parent_index as usize + 1)
+            } else {
+                // Recursively split parent if needed. This will give us a new
+                // parent_node and target_index.
+                self.split_node(
+                    parent_node,
+                    node.parent_offset,
+                    node.parent_index as usize + 1,
+                )
+            }
         };
 
-        let right_offset = self.offset();
-        let right_node = {
-            let right_node = self.new_node();
-            right_node.parent_offset = node_offset;
-            right_node.len = 9;
-            right_node.hashes = right_hashes;
-            right_node.kv_offset = right_kv_offsets;
-            unsafe { &*core::ptr::from_ref(right_node) }
+        debugprint!("SPLIT parent_target_index: {parent_target_index}");
+
+        let new_node_offset = self.offset();
+        let nominated_hash: U24;
+
+        {
+            let new_node = unsafe { self.new_node().as_mut() };
+            // The `new_node` statement MUST come before this incase of re-allocation.
+            let node = unsafe { self.get_node(node_offset).as_mut() };
+
+            new_node.parent_offset = node.parent_offset;
+            new_node.parent_index = parent_target_index as u8;
+
+            new_node.hashes[0..9].copy_from_slice(&node.hashes[10..19]);
+            node.hashes[10..19].copy_from_slice(&[U24::ZERO; 9]);
+            if node.is_leaf() {
+                new_node.kv_offset[0..9].copy_from_slice(&node.kv_offset[10..19]);
+                node.kv_offset[10..19].copy_from_slice(&[U24::ZERO; 9]);
+            } else {
+                new_node.children_offset[0..10].copy_from_slice(&node.children_offset[10..20]);
+                node.children_offset[10..20].copy_from_slice(&[U24::ZERO; 10]);
+                // Update all the new node's children's parent offset and index
+                for (i, child_offset) in new_node.children_offset.iter().enumerate().take(10) {
+                    let child = unsafe { self.get_node(*child_offset).as_mut() };
+                    child.parent_offset = new_node_offset;
+                    child.parent_index = i as u8;
+                }
+            }
+
+            node.len = 10;
+            new_node.len = 9;
+
+            debugprint!("SPLIT NEW {new_node:?}");
+
+            nominated_hash = new_node.hashes[0];
+        }
+
+        unsafe {
+            let parent_node = self.get_node(parent_node_offset).as_mut();
+            parent_node.insert_child(new_node_offset, nominated_hash, parent_target_index);
+            debugprint!("SPLIT PARENT AFTER: {parent_node:?}")
         };
 
-        debugprint!("Left node: {left_node:?}");
-        debugprint!("Right node: {right_node:?}");
-
-        {
-            let node = unsafe { self.get_node_mut(node_offset) };
-            node.hashes = [U24::ZERO; 19];
-            node.kv_offset = [U24::ZERO; 19];
-            node.len = 1;
-            // A node always has len + 1 children
-            node.children_offset[0] = left_offset;
-            node.children_offset[1] = right_offset;
-            node.hashes[0] = left_node.hashes[left_node.len as usize - 1];
-        }
-
-        {
-            let header = self.header_mut();
-            header.depth += 1;
-        }
+        debugprint!("SPLIT LEFT {:?}", unsafe { node.as_ref() });
 
         if target_index < 10 {
-            (unsafe { self.get_node_mut(left_offset) }, target_index)
+            (node_offset, target_index)
         } else {
-            (
-                unsafe { self.get_node_mut(right_offset) },
-                target_index - 10,
-            )
+            (new_node_offset, target_index - 10)
         }
     }
 
-    fn new_node(&mut self) -> &mut Node {
+    fn split_root(
+        &mut self,
+        node: NonNull<Node>,
+        node_offset: U24,
+        target_index: usize,
+    ) -> (U24, usize) {
+        debug_assert_eq!(node_offset, self.header().root_offset);
+
+        let left_node_offset: U24;
+        let right_node_offset: U24;
+
+        // Similar to `Tree::new_node`, but allocate both at the same time.
+        let (mut left_node, mut right_node) = {
+            left_node_offset = self.offset();
+            right_node_offset = left_node_offset + U24::try_from(Node::SIZE).unwrap();
+            let buf = self.extend_by(2 * Node::SIZE);
+            let r: &Node = unsafe { core::mem::transmute(&mut buf[0]) };
+            let r2: &Node = unsafe { core::mem::transmute(&mut buf[Node::SIZE]) };
+            (NonNull::from(r), NonNull::from(r2))
+        };
+
+        let (left_node, right_node) = unsafe { (left_node.as_mut(), right_node.as_mut()) };
+
+        left_node.len = 10;
+        right_node.len = 9;
+        left_node.parent_offset = node_offset;
+        right_node.parent_offset = node_offset;
+        left_node.parent_index = 0;
+        right_node.parent_index = 1;
+
+        let node = unsafe { self.get_node(node_offset).as_mut() };
+
+        left_node.hashes[0..10].copy_from_slice(&node.hashes[0..10]);
+        right_node.hashes[0..9].copy_from_slice(&node.hashes[10..19]);
+
+        node.hashes = [U24::ZERO; 19];
+        // All hashes in the right node should be greater than or equal to the promoted hash.
+        node.hashes[0] = right_node.hashes[0];
+
+        if node.is_leaf() {
+            left_node.kv_offset[0..10].copy_from_slice(&node.kv_offset[0..10]);
+            right_node.kv_offset[0..9].copy_from_slice(&node.kv_offset[10..19]);
+            node.kv_offset = [U24::ZERO; 19];
+        } else {
+            left_node.children_offset[0..10].copy_from_slice(&node.children_offset[0..10]);
+            right_node.children_offset[0..10].copy_from_slice(&node.children_offset[10..20]);
+            node.children_offset = [U24::ZERO; 20];
+
+            // Update the children of both new nodes to point to the new parent.
+            for child_offset in left_node.children_offset.iter().take(10) {
+                let child = unsafe { self.get_node(*child_offset).as_mut() };
+                child.parent_offset = left_node_offset;
+            }
+
+            for (i, child_offset) in right_node.children_offset.iter().enumerate().take(10) {
+                let child = unsafe { self.get_node(*child_offset).as_mut() };
+                child.parent_offset = right_node_offset;
+                child.parent_index = i as u8;
+            }
+        }
+
+        // An internal node's len is # of children - 1
+        node.len = 1;
+        node.children_offset[0] = left_node_offset;
+        node.children_offset[1] = right_node_offset;
+        self.header_mut().depth += 1;
+
+        debugprint!("SPLIT ROOT LEFT: {left_node:?}");
+        debugprint!("SPLIT ROOT RIGHT: {right_node:?}");
+        debugprint!("SPLIT ROOT NEW: {node:?}");
+
+        // iterate over left and right node children, update parent_offset (to )
+        // iterate over all right node children, update parent_index
+
+        if target_index < 10 {
+            (left_node_offset, target_index)
+        } else {
+            (right_node_offset, target_index - 10)
+        }
+    }
+
+    fn new_node(&mut self) -> NonNull<Node> {
         let buf = self.extend_by(Node::SIZE);
-        unsafe { core::mem::transmute(&mut buf[0]) }
+        let r: &Node = unsafe { core::mem::transmute(&mut buf[0]) };
+        NonNull::from(r)
     }
 
     /// Create an [`Entry`] with the given `key` and `value`, writing it to the buffer, and
@@ -399,14 +471,11 @@ impl<'tree> LiteTree<'tree> {
 
     // - Following are all unsafe because they do no bounds checking or validation
 
-    unsafe fn get_node(&self, offset: U24) -> &Node {
-        let start: usize = offset.into();
-        unsafe { core::mem::transmute::<&u8, &Node>(&self.buffer()[start]) }
-    }
-
-    unsafe fn get_node_mut(&mut self, offset: U24) -> &mut Node {
-        let start: usize = offset.into();
-        unsafe { core::mem::transmute::<&mut u8, &mut Node>(&mut self.buffer_mut()[start]) }
+    #[inline]
+    unsafe fn get_node(&self, offset: U24) -> NonNull<Node> {
+        let r: &u8 = &self.buffer()[usize::from(offset)];
+        let r: &Node = unsafe { core::mem::transmute(r) };
+        NonNull::from(r)
     }
 
     unsafe fn get_entry(&self, offset: U24) -> &Entry {
@@ -474,6 +543,20 @@ impl<'tree> LiteTree<'tree> {
             Inner::Vec(ref mut v) => v,
         }
     }
+
+    fn buffer_ptr(&self) -> *const u8 {
+        match self.0 {
+            Inner::Ref(ref r) => r.as_ptr(),
+            Inner::Vec(ref v) => v.as_ptr(),
+        }
+    }
+
+    fn buffer_mut_ptr(&mut self) -> *mut u8 {
+        match self.0 {
+            Inner::Ref(ref mut r) => r.as_mut_ptr(),
+            Inner::Vec(ref mut v) => v.as_mut_ptr(),
+        }
+    }
 }
 
 impl<'tree> Inner<'tree> {
@@ -502,7 +585,7 @@ impl<'tree> Inner<'tree> {
     }
 }
 
-impl fmt::Debug for LiteTree<'_> {
+impl fmt::Debug for Tree<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let mut d = match self.0 {
             Inner::Ref(_) => f.debug_struct("LiteTree::Ref"),
@@ -512,7 +595,7 @@ impl fmt::Debug for LiteTree<'_> {
         d.field("header", header);
 
         let root = unsafe { self.get_node(header.root_offset) };
-        d.field("root", root);
+        d.field("root", &root);
 
         d.finish_non_exhaustive()
     }
@@ -556,6 +639,8 @@ struct Header {
     magic: [u8; 8],
     version: Version,
     depth: u8,
+    // TODO: Do we need to store root offset?
+    // Nodes are fixed size, so the root could always stay at the same offset (size_of Header).
     root_offset: U24,
     leak: U24,
 }
@@ -590,6 +675,26 @@ struct Node {
 impl Node {
     const SIZE: usize = size_of::<Self>();
 
+    /// INVARIANT: NOT FULL
+    unsafe fn insert_child(&mut self, offset: U24, hash: U24, index: usize) {
+        debug_assert!(self.len < 19);
+
+        if (index as u8) <= self.len {
+            // Shift. There are len + 1 children.
+            for i in (index + 1..=self.len as usize + 1).rev() {
+                self.children_offset[i] = self.children_offset[i - 1];
+            }
+            // There are 1 less hashes than children.
+            for i in (index + 1..=self.len as usize).rev() {
+                self.hashes[i] = self.hashes[i - 1];
+            }
+        }
+
+        self.children_offset[index] = offset;
+        self.hashes[index] = hash;
+        self.len += 1;
+    }
+
     #[inline]
     fn rightmost_child_offset(&self) -> U24 {
         self.children_offset[19]
@@ -602,7 +707,12 @@ impl Node {
 
     #[inline]
     fn is_leaf(&self) -> bool {
-        self.children_offset[0] == U24::default()
+        self.children_offset[0] == U24::ZERO
+    }
+
+    #[inline]
+    fn is_root(&self) -> bool {
+        self.parent_offset == U24::ZERO
     }
 
     #[inline]
@@ -646,7 +756,7 @@ impl Entry {
             capacity: U24,
             key_len: U24,
             val_len: U24,
-        };
+        }
         size_of::<_Entry>()
     };
 
@@ -790,47 +900,38 @@ impl TryFrom<usize> for U24 {
 
 #[cfg(test)]
 mod tests {
+    use rand::{distributions::Alphanumeric, Rng};
+
     use super::*;
     extern crate std;
 
-    const KV: [(&str, &str); 28] = [
-        ("first_name", "Frodo"),
-        ("last_name", "Baggins"),
-        ("email", "frodo@shi.re"),
-        ("address", "Bag End, Hobbiton, Shire, Middle-Earth"),
-        ("phone", "+1 234 5678"),
-        ("favourite_colour", "teal"),
-        ("breakfast", "second"),
-        ("relation", "Bilbo"),
-        ("password", "G4nd4lf!"),
-        ("birthday", "September 22"),
-        ("race", "Hobbit"),
-        ("height", "3'6\""),
-        ("weight", "75lbs"),
-        ("eye_colour", "blue"),
-        ("hair_colour", "brown"),
-        ("occupation", "Ring-bearer"),
-        ("weapon", "Sting"),
-        ("allies", "Samwise, Aragorn, Legolas, Gimli, Gandalf"),
-        ("enemies", "Sauron, Gollum, Saruman"),
-        ("quest", "Destroy the One Ring"),
-        ("favourite_food", "Mushrooms"),
-        ("travel_companion", "Samwise Gamgee"),
-        ("favourite_place", "The Shire"),
-        ("pets", "None"),
-        ("hobbies", "Reading, Writing, Walking"),
-        ("favourite_drink", "Ale"),
-        ("notable_achievement", "Mount Doom ascent"),
-        ("languages_spoken", "Westron, Elvish (limited)"),
-    ];
-
     #[test]
     fn it_works() {
-        let mut tree = LiteTree::new();
+        let random_word = || {
+            rand::thread_rng()
+                .sample_iter(&Alphanumeric)
+                .take(8)
+                .map(char::from)
+                .collect::<String>()
+        };
 
-        for (key, val) in KV {
+        let keys: Vec<String> = std::iter::repeat_with(random_word).take(200).collect();
+        let values: Vec<String> = std::iter::repeat_with(random_word).take(200).collect();
+
+        println!("{keys:?}");
+
+        let mut tree = Tree::new();
+
+        // Insert some entries
+        for (key, val) in keys.iter().zip(values.iter()) {
             tree.insert(key.as_bytes(), val.as_bytes());
             assert_eq!(tree.get(key.as_bytes()), Some(val.as_bytes()));
         }
+
+        // Update the values
+        //for (key, val) in keys.iter().zip(values.iter().rev()) {
+        //    tree.insert(key.as_bytes(), val.as_bytes());
+        //    assert_eq!(tree.get(key.as_bytes()), Some(val.as_bytes()));
+        //}
     }
 }

@@ -1,0 +1,7 @@
+[package]
+name = "attobyte"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hash32 = "0.3.1"

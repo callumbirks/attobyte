@@ -7,4 +7,13 @@ edition = "2021"
 hash32 = "0.3.1"
 
 [dev-dependencies]
+criterion = "0.5.1"
 rand = "0.8.5"
+
+[profile.bench]
+opt-level = 2
+codegen-units = 1
+
+[[bench]]
+name = "atto"
+harness = false

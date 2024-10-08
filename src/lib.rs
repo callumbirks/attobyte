@@ -13,7 +13,7 @@ use hash32::{FnvHasher, Hasher};
 const MAGIC: [u8; 8] = [0x61, 0x74, 0x74, 0x6F, 0x62, 0x79, 0x74, 0x65];
 const ROOT_OFFSET: U24 = U24([0x00, 0x00, 0x10]);
 
-struct Tree<'tree>(Inner<'tree>);
+pub struct Tree<'tree>(Inner<'tree>);
 
 enum Inner<'tree> {
     Ref(&'tree mut [u8]),

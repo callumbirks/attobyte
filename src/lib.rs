@@ -145,8 +145,8 @@ impl<'tree> Tree<'tree> {
             for i in 0..len {
                 let entry_hash = node.hashes[i];
 
-                if entry_hash >= key_hash {
-                    debugprint!("Entry Hash {entry_hash} >= Key Hash; moving to child");
+                if key_hash < entry_hash {
+                    debugprint!("Entry Hash {entry_hash} < Key Hash; moving to child");
                     current_node_offset = node.children_offset[i];
                     found_child = true;
                     break;
@@ -154,7 +154,7 @@ impl<'tree> Tree<'tree> {
             }
 
             if !found_child {
-                debugprint!("All Entry Hash < Key Hash; moving to rightmost child");
+                debugprint!("Key Hash >= All Entry Hash; moving to rightmost child");
                 // Move to the rightmost child
                 current_node_offset = node.children_offset[len];
             }
@@ -259,6 +259,10 @@ impl<'tree> Tree<'tree> {
         node.len += 1;
 
         debugprint!("Inserted, now {node:?}");
+
+        if entry_index == 0 && node.parent_index > 0 {
+            self.update_nominated_hash(node, entry_index, key_hash);
+        }
     }
 
     /// Modify the value of an existing [`Entry`]. If the new value fits in the already allocated
@@ -295,7 +299,7 @@ impl<'tree> Tree<'tree> {
             return self.split_root(node, node_offset, target_index);
         }
 
-        debugprint!("SPLIT {:?}", unsafe { node.as_ref() });
+        debugprint!("SPLIT (off={node_offset}) {:?}", unsafe { node.as_ref() });
 
         let (parent_node_offset, parent_target_index) = {
             let node = unsafe { node.as_ref() };
@@ -358,7 +362,7 @@ impl<'tree> Tree<'tree> {
 
             new_node_hash = new_node.hashes[0];
 
-            debugprint!("SPLIT NEW {new_node:?}");
+            debugprint!("SPLIT NEW (off={new_node_offset}) {new_node:?}");
         }
 
         unsafe {
@@ -597,22 +601,47 @@ impl<'tree> Tree<'tree> {
         debug_assert!(!parent_node.is_leaf());
         debug_assert!(index > 0);
 
-        if (index as u8) < parent_node.len {
+        if (index as u8) <= parent_node.len {
             // Shift the hashes and children offsets
-            for i in (index + 2..=parent_node.len as usize + 1).rev() {
-                parent_node.children_offset[i] = parent_node.children_offset[i - 1];
+            for i in (index + 1..=parent_node.len as usize + 1).rev() {
+                let child_offset = parent_node.children_offset[i - 1];
+                let child = unsafe { self.get_node(child_offset).as_mut() };
+                child.parent_index += 1;
+                parent_node.children_offset[i] = child_offset;
             }
-            for i in (index + 1..=parent_node.len as usize).rev() {
+            for i in (index..=parent_node.len as usize).rev() {
                 parent_node.hashes[i] = parent_node.hashes[i - 1];
             }
         }
 
         // The hash at the index is greater than or equal to all the hashes of the child at the index.
-        parent_node.hashes[index] = node_hash;
+        parent_node.hashes[index - 1] = node_hash;
         // We insert the node offset to <hash index> + 1
-        parent_node.children_offset[index + 1] = node_offset;
+        parent_node.children_offset[index] = node_offset;
 
         parent_node.len += 1;
+    }
+
+    // For child nodes which are not the first node in the parent, they have a hash in the
+    // parent which is their lowest hash. If we are inserting to index 0, the node has a new
+    // lowest hash, so their representation in the parent needs updating.
+    // This is recursive because we may update the first hash in parent, so they will need to update
+    // their nominated hash in their parent.
+    fn update_nominated_hash(&mut self, node: &Node, index: usize, key_hash: U24) {
+        debug_assert_eq!(index, 0);
+        debug_assert!(node.parent_index > 0);
+        debug_assert_ne!(node.parent_offset, U24::ZERO);
+
+        let parent_node = unsafe { self.get_node(node.parent_offset).as_mut() };
+
+        let hash_index = node.parent_index as usize - 1;
+        parent_node.hashes[hash_index] = key_hash;
+
+        debugprint!("UPDATE NOM PARENT {parent_node:?}");
+
+        if (hash_index == 0 && parent_node.parent_index > 0) {
+            self.update_nominated_hash(parent_node, hash_index, key_hash);
+        }
     }
 }
 
@@ -968,9 +997,9 @@ mod tests {
         }
 
         // Update the values
-        //for (key, val) in keys.iter().zip(values.iter().rev()) {
-        //    tree.insert(key.as_bytes(), val.as_bytes());
-        //    assert_eq!(tree.get(key.as_bytes()), Some(val.as_bytes()));
-        //}
+        for (key, val) in keys.iter().zip(values.iter().rev()) {
+            tree.insert(key.as_bytes(), val.as_bytes());
+            assert_eq!(tree.get(key.as_bytes()), Some(val.as_bytes()));
+        }
     }
 }

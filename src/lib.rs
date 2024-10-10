@@ -11,7 +11,7 @@ use core::{fmt, ptr::NonNull};
 use hash32::{FnvHasher, Hasher};
 
 const MAGIC: [u8; 8] = [0x61, 0x74, 0x74, 0x6F, 0x62, 0x79, 0x74, 0x65];
-const ROOT_OFFSET: U24 = U24([0x00, 0x00, 0x10]);
+const ROOT_OFFSET: U24 = U24([0x00, 0x00, 0x0D]);
 
 pub struct Tree<'tree>(Inner<'tree>);
 
@@ -325,7 +325,6 @@ impl<'tree> Tree<'tree> {
             }
         };
 
-
         let new_node_offset = self.offset();
         let new_node_hash: U24;
 
@@ -395,7 +394,6 @@ impl<'tree> Tree<'tree> {
             }
 
             new_node_hash = new_node.hashes[0];
-
         }
 
         unsafe {
@@ -407,7 +405,6 @@ impl<'tree> Tree<'tree> {
                 new_node_hash,
             );
         };
-
 
         if target_index < 10 {
             (node_offset, target_index)
@@ -600,20 +597,6 @@ impl<'tree> Tree<'tree> {
         }
     }
 
-    fn buffer_ptr(&self) -> *const u8 {
-        match self.0 {
-            Inner::Ref(ref r) => r.as_ptr(),
-            Inner::Vec(ref v) => v.as_ptr(),
-        }
-    }
-
-    fn buffer_mut_ptr(&mut self) -> *mut u8 {
-        match self.0 {
-            Inner::Ref(ref mut r) => r.as_mut_ptr(),
-            Inner::Vec(ref mut v) => v.as_mut_ptr(),
-        }
-    }
-
     /// INVARIANT: NOT FULL + NOT LEAF + INDEX > 0
     unsafe fn insert_node_child(
         &self,
@@ -662,29 +645,13 @@ impl<'tree> Tree<'tree> {
         let hash_index = node.parent_index as usize - 1;
         parent_node.hashes[hash_index] = key_hash;
 
-        if (hash_index == 0 && parent_node.parent_index > 0) {
+        if hash_index == 0 && parent_node.parent_index > 0 {
             self.update_nominated_hash(parent_node, hash_index, key_hash);
         }
     }
 }
 
 impl<'tree> Inner<'tree> {
-    #[inline]
-    fn bytes(&self) -> &[u8] {
-        match self {
-            Inner::Ref(ref r) => r,
-            Inner::Vec(ref v) => v,
-        }
-    }
-
-    #[inline]
-    fn bytes_mut(&mut self) -> &mut [u8] {
-        match self {
-            Inner::Ref(ref mut r) => r,
-            Inner::Vec(ref mut v) => v,
-        }
-    }
-
     #[inline]
     fn len(&self) -> usize {
         match self {
@@ -734,15 +701,6 @@ enum Version {
     V0,
 }
 
-impl Version {
-    fn from_byte(byte: u8) -> Option<Self> {
-        match byte {
-            0 => Some(Version::V0),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Debug)]
 #[repr(C)]
 struct Header {
@@ -781,11 +739,6 @@ struct Node {
 
 impl Node {
     const SIZE: usize = size_of::<Self>();
-
-    #[inline]
-    fn rightmost_child_offset(&self) -> U24 {
-        self.children_offset[19]
-    }
 
     #[inline]
     fn has_space(&self) -> bool {
@@ -839,10 +792,10 @@ impl Entry {
     /// The size in bytes of an `Entry`, excluding the variable-length `key_val` field.
     const SIZE: usize = {
         struct _Entry {
-            control: u8,
-            capacity: U24,
-            key_len: U24,
-            val_len: U24,
+            _control: u8,
+            _capacity: U24,
+            _key_len: U24,
+            _val_len: U24,
         }
         size_of::<_Entry>()
     };
@@ -980,15 +933,18 @@ mod tests {
     #[test]
     fn it_works() {
         let random_word = || {
+            let len: usize = rand::thread_rng().gen_range(16..64);
             rand::thread_rng()
                 .sample_iter(&Alphanumeric)
-                .take(8)
+                .take(len)
                 .map(char::from)
                 .collect::<String>()
         };
 
         let keys: Vec<String> = std::iter::repeat_with(random_word).take(200).collect();
         let values: Vec<String> = std::iter::repeat_with(random_word).take(200).collect();
+
+        eprintln!("{keys:?}");
 
         let mut tree = Tree::new();
 

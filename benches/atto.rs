@@ -1,9 +1,9 @@
 use attobyte::Tree;
 use criterion::{criterion_group, criterion_main, Criterion};
+use rand::seq::SliceRandom;
 use rand::{distributions::Alphanumeric, Rng};
 use std::collections::BTreeMap;
 use std::string::String;
-use rand::seq::SliceRandom;
 
 const KV_COUNT: usize = 500;
 const DELETIONS_COUNT: usize = 100;

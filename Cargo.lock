@@ -30,6 +30,8 @@ dependencies = [
  "criterion",
  "hash32",
  "rand",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

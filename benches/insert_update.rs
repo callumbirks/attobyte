@@ -25,7 +25,7 @@ fn atto_insert_update(c: &mut Criterion) {
         .map(Clone::clone)
         .collect();
 
-    c.bench_function("atto_insert_update", |b| {
+    c.bench_function("insert_update/atto", |b| {
         b.iter(|| {
             let mut tree = Tree::new();
 
@@ -57,23 +57,25 @@ fn std_insert_update(c: &mut Criterion) {
         .map(Clone::clone)
         .collect();
 
-    c.bench_function("std_insert_update", |b| {
+    let str_to_box_bytes = |str: &str| str.as_bytes().to_vec().into_boxed_slice();
+
+    c.bench_function("insert_update/std_btreemap", |b| {
         b.iter(|| {
-            let mut tree = BTreeMap::new();
+            let mut tree: BTreeMap<Box<[u8]>, Box<[u8]>> = BTreeMap::new();
 
             for (key, value) in keys.iter().zip(values.iter()) {
-                tree.insert(key.as_bytes(), value.as_bytes());
+                tree.insert(str_to_box_bytes(&key), str_to_box_bytes(&value));
                 let _ = tree.get(key.as_bytes());
             }
             for (key, value) in keys.iter().zip(values.iter().rev()) {
-                tree.insert(key.as_bytes(), value.as_bytes());
+                tree.insert(str_to_box_bytes(&key), str_to_box_bytes(&value));
                 let _ = tree.get(key.as_bytes());
             }
             for key in &deleted_keys {
                 tree.remove(key.as_bytes());
             }
             for (key, val) in deleted_keys.iter().zip(values.iter().take(DELETIONS_COUNT)) {
-                tree.insert(key.as_bytes(), val.as_bytes());
+                tree.insert(str_to_box_bytes(&key), str_to_box_bytes(&val));
                 let _ = tree.get(key.as_bytes());
             }
         });

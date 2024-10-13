@@ -30,6 +30,7 @@ mod tests {
     use rand::seq::SliceRandom;
     use rand::{distributions::Alphanumeric, Rng};
     use std::string::String;
+    use util::debugprint;
 
     fn random_word() -> String {
         let len: usize = rand::thread_rng().gen_range(16..64);
@@ -40,8 +41,8 @@ mod tests {
             .collect::<String>()
     }
 
-    const KV_COUNT: usize = 500;
-    const DELETION_COUNT: usize = 100;
+    const KV_COUNT: usize = 5000;
+    const DELETION_COUNT: usize = 500;
 
     #[test]
     fn insert_update_remove() {
@@ -55,12 +56,14 @@ mod tests {
         // Insert some entries
         for (key, val) in keys.iter().zip(values.iter()) {
             tree.insert(key.as_bytes(), val.as_bytes());
+            debugprint!("{tree:?}");
             assert_eq!(tree.get(key.as_bytes()), Some(val.as_bytes()));
         }
 
         // Update the values
         for (key, val) in keys.iter().zip(values.iter().rev()) {
             tree.insert(key.as_bytes(), val.as_bytes());
+            debugprint!("{tree:?}");
             assert_eq!(tree.get(key.as_bytes()), Some(val.as_bytes()));
         }
 

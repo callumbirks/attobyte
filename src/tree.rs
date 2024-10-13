@@ -119,7 +119,7 @@ impl<'tree> Tree<'tree> {
                 self.update_existing_entry(node_offset, entry_index, value)
             }
             KeyStatus::RequiresShift => {
-                self.insert_new_and_shift(node_offset, entry_index, key, key_hash, value)
+                self.insert_new_entry(node_offset, entry_index, key, key_hash, value)
             }
         };
     }
@@ -313,30 +313,6 @@ impl<'tree> Tree<'tree> {
         };
 
         let node = unsafe { node.as_mut() };
-        node.offsets[entry_index] = new_offset;
-        node.hashes[entry_index] = key_hash;
-        node.len += 1;
-    }
-
-    fn insert_new_and_shift(
-        &mut self,
-        node_offset: U24,
-        entry_index: usize,
-        key: &[u8],
-        key_hash: U24,
-        value: &[u8],
-    ) {
-        let new_offset = self.new_entry(key, value);
-        let node = unsafe { self.get_node(node_offset) };
-
-        let (mut node, entry_index) = if unsafe { node.as_ref() }.has_space() {
-            (node, entry_index)
-        } else {
-            let (node_offset, entry_index) = self.split_node(node, node_offset, entry_index);
-            (unsafe { self.get_node(node_offset) }, entry_index)
-        };
-
-        let node = unsafe { node.as_mut() };
 
         for i in (entry_index + 1..=node.len as usize).rev() {
             node.offsets[i] = node.offsets[i - 1];
@@ -348,7 +324,10 @@ impl<'tree> Tree<'tree> {
         node.len += 1;
 
         if entry_index == 0 && node.parent_index > 0 {
-            self.update_nominated_hash(node, key_hash);
+            // Update this node's representation in just the parent node.
+            let parent_node = unsafe { self.get_node(node.parent_offset).as_mut() };
+            let hash_index = node.parent_index as usize - 1;
+            parent_node.hashes[hash_index] = key_hash;
         }
     }
 
@@ -395,10 +374,8 @@ impl<'tree> Tree<'tree> {
 
         let (parent_node_offset, parent_target_index) = {
             let node = unsafe { node.as_ref() };
+            debugprint!("\nBEGIN SPLIT\nNode: {node:?}\n{self:?}");
             let parent_node = unsafe { self.get_node(node.parent_offset) };
-            debugprint!("Split {node:?}");
-            debugprint!("Split Parent {:?}", unsafe { parent_node.as_ref() });
-
             if unsafe { parent_node.as_ref() }.has_space() {
                 (node.parent_offset, node.parent_index as usize + 1)
             } else {
@@ -413,7 +390,6 @@ impl<'tree> Tree<'tree> {
         };
 
         let new_node_offset = self.offset();
-        let new_node_hash: U24;
 
         {
             let new_node = unsafe { self.new_node().as_mut() };
@@ -425,27 +401,15 @@ impl<'tree> Tree<'tree> {
 
             if node.is_leaf() {
                 // Move hashes 10..19 to new_node
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        node.hashes.as_ptr().add(10),
-                        new_node.hashes.as_mut_ptr(),
-                        9,
-                    );
-                    core::ptr::write_bytes(node.hashes.as_mut_ptr().add(10), 0, 9);
-                }
+                new_node.hashes[0..9].copy_from_slice(&node.hashes[10..19]);
+                node.hashes[10..19].copy_from_slice(&[U24::ZERO; 9]);
 
                 node.len = 10;
                 new_node.len = 9;
 
                 // Move kv_offset 10..19 to new_node
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        node.offsets.as_ptr().add(10),
-                        new_node.offsets.as_mut_ptr(),
-                        9,
-                    );
-                    core::ptr::write_bytes(node.offsets.as_mut_ptr().add(10), 0, 9);
-                }
+                new_node.offsets[0..9].copy_from_slice(&node.offsets[10..19]);
+                node.offsets[10..19].copy_from_slice(&[U24::ZERO; 9]);
 
                 // Set the leaf marker.
                 new_node.offsets[19] = U24::MAX;
@@ -453,27 +417,15 @@ impl<'tree> Tree<'tree> {
                 // Split the hashes between the nodes. Leave off the last hash of the left node to
                 // ensure there are always len + 1 children.
                 // Move hashes 10..19 to new_node
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        node.hashes.as_ptr().add(10),
-                        new_node.hashes.as_mut_ptr(),
-                        9,
-                    );
-                    core::ptr::write_bytes(node.hashes.as_mut_ptr().add(9), 0, 10);
-                }
+                new_node.hashes[0..9].copy_from_slice(&node.hashes[10..19]);
+                node.hashes[9..19].copy_from_slice(&[U24::ZERO; 10]);
 
                 node.len = 9;
                 new_node.len = 9;
 
-                // Move children_offset 10..19 to new_node
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        node.offsets.as_ptr().add(10),
-                        new_node.offsets.as_mut_ptr(),
-                        10,
-                    );
-                    core::ptr::write_bytes(node.offsets.as_mut_ptr().add(10), 0, 10);
-                }
+                // Move children_offset 10..20 to new_node
+                new_node.offsets[0..10].copy_from_slice(&node.offsets[10..20]);
+                node.offsets[10..20].copy_from_slice(&[U24::ZERO; 10]);
 
                 // Update all the new node's children's parent offset and index
                 for (i, child_offset) in new_node.offsets.iter().enumerate().take(10) {
@@ -481,26 +433,17 @@ impl<'tree> Tree<'tree> {
                     child.parent_offset = new_node_offset;
                     child.parent_index = i as u8;
                 }
-
-                debugprint!("Split Finish Left {node:?}");
-                debugprint!("Split Finish Right {new_node:?}");
             }
 
-            new_node_hash = new_node.hashes[0];
+            debugprint!("\nEND SPLIT\nL Node: {node:?}\nR Node: {new_node:?}\n{self:?}");
         }
 
         unsafe {
             let parent_node = self.get_node(parent_node_offset).as_mut();
-            self.insert_node_child(
-                parent_node,
-                parent_target_index,
-                new_node_offset,
-                new_node_hash,
-            );
-            debugprint!("Split Finish Parent {parent_node:?}");
+            self.insert_node_child(parent_node, parent_target_index, new_node_offset);
         };
 
-        if target_index < 10 {
+        if target_index < 11 {
             (node_offset, target_index)
         } else {
             (new_node_offset, target_index - 10)
@@ -530,7 +473,7 @@ impl<'tree> Tree<'tree> {
 
         let root_node = unsafe { self.root_node().as_mut() };
 
-        debugprint!("Split Root {root_node:?}");
+        debugprint!("\nBEGIN ROOT SPLIT\nNode: {root_node:?}\n{self:?}");
 
         if root_node.is_leaf() {
             left_node.len = 10;
@@ -540,7 +483,7 @@ impl<'tree> Tree<'tree> {
 
             left_node.offsets[0..10].copy_from_slice(&root_node.offsets[0..10]);
             right_node.offsets[0..9].copy_from_slice(&root_node.offsets[10..19]);
-            root_node.offsets = [U24::ZERO; 20];
+            root_node.offsets.fill(U24::ZERO);
 
             // Set the leaf markers
             left_node.offsets[19] = U24::MAX;
@@ -555,7 +498,7 @@ impl<'tree> Tree<'tree> {
 
             left_node.offsets[0..10].copy_from_slice(&root_node.offsets[0..10]);
             right_node.offsets[0..10].copy_from_slice(&root_node.offsets[10..20]);
-            root_node.offsets = [U24::ZERO; 20];
+            root_node.offsets.fill(U24::ZERO);
 
             // Update the children of both new nodes to point to the new parent.
             for child_offset in left_node.offsets.iter().take(10) {
@@ -570,9 +513,9 @@ impl<'tree> Tree<'tree> {
             }
         }
 
-        root_node.hashes = [U24::ZERO; 19];
+        root_node.hashes.fill(U24::ZERO);
         // All hashes in the right node should be greater than or equal to the promoted hash.
-        root_node.hashes[0] = right_node.hashes[0];
+        root_node.hashes[0] = self.lowest_leaf_hash(right_node);
 
         // An internal node's len is # of children - 1
         root_node.len = 1;
@@ -580,14 +523,9 @@ impl<'tree> Tree<'tree> {
         root_node.offsets[1] = right_node_offset;
         self.header_mut().depth += 1;
 
-        debugprint!("Split Root Done Root {root_node:?}");
-        debugprint!("Split Root Done Left {left_node:?}");
-        debugprint!("Split Root Done Rght {right_node:?}");
+        debugprint!("\nEND ROOT SPLIT\nRoot Node: {root_node:?}\nLeft Node: {left_node:?}\nRght Node: {right_node:?}\n{self:?}");
 
-        // iterate over left and right node children, update parent_offset (to )
-        // iterate over all right node children, update parent_index
-
-        if target_index < 10 {
+        if target_index < 11 {
             (left_node_offset, target_index)
         } else {
             (right_node_offset, target_index - 10)
@@ -701,16 +639,22 @@ impl<'tree> Tree<'tree> {
         }
     }
 
+    fn lowest_leaf_hash(&self, node: &Node) -> U24 {
+        if node.is_leaf() {
+            node.hashes[0]
+        } else {
+            let lowest_child = unsafe { self.get_node(node.offsets[0]).as_ref() };
+            self.lowest_leaf_hash(lowest_child)
+        }
+    }
+
     /// INVARIANT: NOT FULL + NOT LEAF + INDEX > 0
-    unsafe fn insert_node_child(
-        &mut self,
-        parent_node: &mut Node,
-        index: usize,
-        node_offset: U24,
-        node_hash: U24,
-    ) {
+    unsafe fn insert_node_child(&mut self, parent_node: &mut Node, index: usize, node_offset: U24) {
         debug_assert!(parent_node.len < 19);
         debug_assert!(!parent_node.is_leaf());
+        debug_assert!(index > 0);
+
+        debugprint!("\nBEGIN INSERT_NODE_CHILD\nindex: {index}\nNode: {parent_node:?}\n{self:?}");
 
         if (index as u8) <= parent_node.len {
             // Shift the hashes and children offsets
@@ -721,44 +665,17 @@ impl<'tree> Tree<'tree> {
                 parent_node.offsets[i] = child_offset;
             }
             for i in (index..=parent_node.len as usize).rev() {
-                if i > 0 {
-                    parent_node.hashes[i] = parent_node.hashes[i - 1];
-                }
+                parent_node.hashes[i] = parent_node.hashes[i - 1];
             }
         }
 
-        // The hash at the index is greater than or equal to all the hashes of the child at the index.
-        if index > 0 {
-            parent_node.hashes[index - 1] = node_hash;
-        }
         // We insert the node offset to <hash index> + 1
         parent_node.offsets[index] = node_offset;
+        let inserted_node = unsafe { self.get_node(node_offset).as_ref() };
+        parent_node.hashes[index - 1] = self.lowest_leaf_hash(inserted_node);
 
         parent_node.len += 1;
-
-        if index == 0 {
-            let node = unsafe { self.get_node(node_offset).as_ref() };
-            self.update_nominated_hash(node, node_hash);
-        }
-    }
-
-    // For child nodes which are not the first node in the parent, they have a hash in the
-    // parent which is their lowest hash. If we are inserting to index 0, the node has a new
-    // lowest hash, so their representation in the parent needs updating.
-    // This is recursive because we may update the first hash in parent, so they will need to update
-    // their nominated hash in their parent.
-    fn update_nominated_hash(&mut self, node: &Node, key_hash: U24) {
-        debug_assert!(node.parent_index > 0);
-        debug_assert_ne!(node.parent_offset, U24::ZERO);
-
-        let parent_node = unsafe { self.get_node(node.parent_offset).as_mut() };
-
-        let hash_index = node.parent_index as usize - 1;
-        parent_node.hashes[hash_index] = key_hash;
-
-        if hash_index == 0 && parent_node.parent_index > 0 {
-            self.update_nominated_hash(parent_node, key_hash);
-        }
+        debugprint!("\nEND INSERT_NODE_CHILD\nNode: {parent_node:?}\n{self:?}");
     }
 
     fn all_entry_offsets(&self) -> Vec<U24> {
@@ -784,22 +701,46 @@ impl<'tree> Tree<'tree> {
             }
         }
     }
+
+    fn traverse_termtree(&self, node: &Node) -> termtree::Tree<DTreeNode> {
+        let tree = termtree::Tree::new(DTreeNode {
+            hashes: node.hashes,
+        });
+        if node.is_leaf() {
+            tree
+        } else {
+            let mut leaves: Vec<termtree::Tree<DTreeNode>> =
+                Vec::with_capacity(node.len as usize + 1);
+            for child_offset in &node.offsets[..=node.len as usize] {
+                let child = unsafe { self.get_node(*child_offset).as_ref() };
+                leaves.push(self.traverse_termtree(child));
+            }
+            let tree = tree.with_leaves(leaves);
+            tree
+        }
+    }
+
+    fn get_termtree(&self) -> termtree::Tree<DTreeNode> {
+        let root_node = unsafe { self.root_node().as_ref() };
+        self.traverse_termtree(root_node)
+    }
+}
+
+#[derive(Debug)]
+struct DTreeNode {
+    hashes: [U24; 19],
+}
+
+impl fmt::Display for DTreeNode {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        <Self as fmt::Debug>::fmt(self, f)
+    }
 }
 
 impl fmt::Debug for Tree<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let mut d = match self.0 {
-            Inner::Ref(_) => f.debug_struct("LiteTree::Ref"),
-            Inner::RefMut(_) => f.debug_struct("LiteTree::RefMut"),
-            Inner::Vec(_) => f.debug_struct("LiteTree::Vec"),
-        };
-        let header = self.header();
-        d.field("header", header);
-
-        let root = self.root_node();
-        d.field("root", &root);
-
-        d.finish_non_exhaustive()
+        let tree = self.get_termtree();
+        <termtree::Tree<DTreeNode> as fmt::Display>::fmt(&tree, f)
     }
 }
 

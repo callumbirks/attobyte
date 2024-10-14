@@ -7,6 +7,7 @@ use rand::distributions::{self, Distribution};
 use rand::seq::SliceRandom;
 use rand::{distributions::Alphanumeric, Rng};
 use std::string::String;
+use tree::TreeBuf;
 use value::{private, Encodable, NullValue};
 
 fn random_word() -> String {
@@ -14,6 +15,14 @@ fn random_word() -> String {
     rand::thread_rng()
         .sample_iter(&Alphanumeric)
         .take(len)
+        .map(char::from)
+        .collect::<String>()
+}
+
+fn random_word_const_len() -> String {
+    rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(32)
         .map(char::from)
         .collect::<String>()
 }
@@ -233,4 +242,53 @@ fn trim() {
         let val = &values[i];
         assert!(tree.get(&key).is_some_and(|v| v == val.as_str()));
     }
+}
+
+#[test]
+fn no_reallocation() {
+    let keys: Vec<String> = std::iter::repeat_with(random_word_const_len)
+        .take(KV_COUNT)
+        .collect();
+    let values: Vec<String> = std::iter::repeat_with(random_word_const_len)
+        .take(KV_COUNT)
+        .collect();
+    let deleted_keys: Vec<String> = keys
+        .choose_multiple(&mut rand::thread_rng(), DELETION_COUNT)
+        .map(Clone::clone)
+        .collect();
+
+    let mut tree = Tree::new();
+
+    for (key, val) in keys.iter().zip(values.iter()) {
+        tree.insert(key, val.as_str());
+    }
+
+    let mut vec = tree.finish_vec();
+
+    // Construct a tree which holds a mutable slice, instead of a vec,
+    // to demonstrate that it will avoid reallocation - unless there are
+    // new insertions.
+    let mut tree = Tree::from_bytes_mut(&mut vec).unwrap();
+
+    // When updating existing keys, as long as the values fit within the original capacity,
+    // the tree should not re-allocate.
+    for (key, val) in keys.iter().zip(values.iter().rev()) {
+        tree.insert(key, val.as_str());
+        assert!(tree.get(key).is_some_and(|v| v == val.as_str()));
+    }
+
+    // Unless the tree is backed by an owned Vec, it should not reallocate
+    // after any removals.
+    for key in &deleted_keys {
+        assert!(tree.remove(key));
+    }
+
+    // When updating previously deleted keys, the tree should not reallocate.
+    for (key, val) in keys.iter().zip(values.iter()) {
+        tree.insert(key, val.as_str());
+        assert!(tree.get(key).is_some_and(|v| v == val.as_str()));
+    }
+
+    // Make sure the tree hasn't been reallocated into a vec.
+    assert!(matches!(tree.finish(), TreeBuf::Slice(_)));
 }

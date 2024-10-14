@@ -15,7 +15,14 @@ const ROOT_OFFSET: U24 = U24([0x00, 0x00, 0x0D]);
 const LEAK_TRIGGER: U24 = U24([0x00, 0x10, 0x00]);
 
 #[derive(Clone)]
-pub struct Tree<'tree>(Inner<'tree>);
+pub struct Tree<'tree> {
+    inner: Inner<'tree>,
+}
+
+pub enum TreeBuf<'tree> {
+    Slice(&'tree [u8]),
+    Vec(Vec<u8>),
+}
 
 impl<'tree> Tree<'tree> {
     const MIN_BUF_SIZE: usize = size_of::<Header>() + size_of::<Node>();
@@ -38,7 +45,9 @@ impl<'tree> Tree<'tree> {
         let root_node = Node::default();
         buf.extend_from_slice(byte_slice!(Node, &root_node));
 
-        Tree(Inner::Vec(buf))
+        Tree {
+            inner: Inner::Vec(buf),
+        }
     }
 
     pub fn from_bytes(bytes: &'tree [u8]) -> Result<Self> {
@@ -51,7 +60,9 @@ impl<'tree> Tree<'tree> {
         // TODO: Validate
         // Follow the path down every node, checking every offset fits within the source data.
 
-        Ok(Tree(Inner::Ref(bytes)))
+        Ok(Tree {
+            inner: Inner::Ref(bytes),
+        })
     }
 
     pub fn from_bytes_mut(bytes: &'tree mut [u8]) -> Result<Self> {
@@ -64,11 +75,15 @@ impl<'tree> Tree<'tree> {
         // TODO: Validate
         // Follow the path down every node, checking every offset fits within the source data.
 
-        Ok(Tree(Inner::RefMut(bytes)))
+        Ok(Tree {
+            inner: Inner::RefMut(bytes),
+        })
     }
 
     pub unsafe fn from_bytes_unchecked(bytes: &'tree mut [u8]) -> Self {
-        Tree(Inner::RefMut(bytes))
+        Tree {
+            inner: Inner::RefMut(bytes),
+        }
     }
 
     pub fn get(&self, key: &str) -> Option<&Value> {
@@ -96,7 +111,7 @@ impl<'tree> Tree<'tree> {
     where
         V: Encodable,
     {
-        if !self.0.is_mutable() {
+        if !self.inner.is_mutable() {
             // TODO: Return Error?
             return;
         }
@@ -125,7 +140,7 @@ impl<'tree> Tree<'tree> {
     }
 
     pub fn remove(&mut self, key: &str) -> bool {
-        if !self.0.is_mutable() {
+        if !self.inner.is_mutable() {
             // TODO: Return Error?
             return false;
         }
@@ -147,7 +162,7 @@ impl<'tree> Tree<'tree> {
             entry.mark_deleted();
             let len = entry.len();
             let header = self.header_mut();
-            if header.leak >= LEAK_TRIGGER {
+            if header.leak >= LEAK_TRIGGER && self.inner.is_vec() {
                 self.trim();
             } else {
                 self.header_mut().leak += len;
@@ -158,55 +173,39 @@ impl<'tree> Tree<'tree> {
         }
     }
 
-    /// Complete usage of the tree, retrieving the underlying data as a `Vec<u8>`.
-    ///
-    /// If the tree was created with [`Tree::from_bytes`], and has not been modified,
-    /// or has been modified but [`Tree::is_allocated`] is false, it would be more
-    /// efficient to call [`Tree::finish`].
-    pub fn finish_vec(mut self) -> Vec<u8> {
-        if self.header().leak != U24::ZERO {
-            self.trim();
-        }
-        match self.0 {
-            Inner::Ref(ref r) => r.to_vec(),
-            Inner::RefMut(ref r) => r.to_vec(),
-            Inner::Vec(v) => v,
+    /// Complete usage of the tree, relinquishing control of the original
+    /// (or re-allocated) buffer back to the caller.
+    pub fn finish(self) -> TreeBuf<'tree> {
+        match self.inner {
+            Inner::Ref(r) => TreeBuf::Slice(r),
+            Inner::RefMut(r) => TreeBuf::Slice(r),
+            Inner::Vec(v) => TreeBuf::Vec(v),
         }
     }
 
-    /// Complete usage of the tree, relinquishing control of the original
-    /// buffer back to the caller.
-    ///
-    /// This will return an error if the underlying buffer for the tree is a Vec,
-    /// rather than a slice. The conditions which would cause that are described below.
-    ///
-    /// In such a case, one should call [`Tree::finish_vec`] to get the underlying vec.
-    ///
-    /// # Errors
-    /// - If this tree was created with [`Tree::new`] or [`Tree::with_capacity`].
-    /// - If this tree outgrew the original buffer and has since reallocated.
-    pub fn finish(self) -> Result<()> {
-        match self.0 {
-            Inner::Ref(_) | Inner::RefMut(_) => Ok(()),
-            Inner::Vec(_) => Err(crate::Error::TreeAllocated),
+    pub fn finish_vec(self) -> Vec<u8> {
+        match self.inner {
+            Inner::Ref(r) => r.to_vec(),
+            Inner::RefMut(r) => r.to_vec(),
+            Inner::Vec(v) => v,
         }
     }
 
     pub fn trim(&mut self) {
         let leak: usize = self.header().leak.into();
 
-        let mut tree = Tree::with_capacity(self.0.len() - leak);
+        let mut tree = Tree::with_capacity(self.inner.len() - leak);
 
         for (key, val) in self.into_iter() {
             tree.insert(key, val);
         }
 
-        self.0 = tree.0;
+        self.inner = tree.inner;
     }
 
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
-        self.0.len()
+        self.inner.len()
     }
 
     /// Return the Node and Entry Index where a given key either exists or should be inserted.
@@ -591,14 +590,14 @@ impl<'tree> Tree<'tree> {
 
     /// Extend the buffer by `size` bytes, and return a mutable slice to the new bytes.
     fn extend_by(&mut self, size: usize) -> &mut [u8] {
-        let len: usize = match self.0 {
+        let len: usize = match self.inner {
             Inner::Ref(_) => Inner::panic_mutate_ref(),
             Inner::RefMut(ref r) => {
                 // We can't extend unless this is a vec, so we have to clone the existing bytes.
                 let mut vec = r.to_vec();
                 vec.resize(vec.len() + size, 0);
                 let len = vec.len();
-                self.0 = Inner::Vec(vec);
+                self.inner = Inner::Vec(vec);
                 len
             }
             Inner::Vec(ref mut vec) => {
@@ -611,11 +610,11 @@ impl<'tree> Tree<'tree> {
     }
 
     fn offset(&self) -> U24 {
-        U24::from(self.0.len())
+        U24::from(self.inner.len())
     }
 
     fn buffer(&self) -> &[u8] {
-        match self.0 {
+        match self.inner {
             Inner::Ref(ref r) => r,
             Inner::RefMut(ref r) => r,
             Inner::Vec(ref v) => v,
@@ -623,7 +622,7 @@ impl<'tree> Tree<'tree> {
     }
 
     fn buffer_mut(&mut self) -> &mut [u8] {
-        match self.0 {
+        match self.inner {
             Inner::Ref(_) => Inner::panic_mutate_ref(),
             Inner::RefMut(ref mut r) => r,
             Inner::Vec(ref mut v) => v,
@@ -773,6 +772,10 @@ impl<'tree> Inner<'tree> {
     #[track_caller]
     fn panic_mutate_ref() -> ! {
         panic!("Attempted to mutate an Inner::Ref!")
+    }
+
+    fn is_vec(&self) -> bool {
+        matches!(self, Self::Vec(_))
     }
 }
 

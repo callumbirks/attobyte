@@ -36,7 +36,7 @@ fn atto_serialize(c: &mut Criterion) {
                 let _ = tree.get(key);
             }
 
-            tree.finish().unwrap();
+            let _ = tree.finish();
         });
     });
 }

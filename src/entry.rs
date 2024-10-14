@@ -1,4 +1,4 @@
-use crate::U24;
+use crate::{value::Encodable, Value, U24};
 
 #[derive(Debug)]
 #[repr(C)]
@@ -27,12 +27,15 @@ impl Entry {
     };
     pub const EXTRA_CAPACITY: usize = 16;
 
-    pub fn key(&self) -> &[u8] {
-        &self.key_val[..usize::from(self.key_len)]
+    pub fn key(&self) -> &str {
+        let key: &[u8] = &self.key_val[..usize::from(self.key_len)];
+        unsafe { core::str::from_utf8_unchecked(key) }
     }
 
-    pub fn val(&self) -> &[u8] {
-        &self.key_val[usize::from(self.key_len)..usize::from(self.key_len + self.val_len)]
+    pub fn val(&self) -> &Value {
+        let val: &[u8] =
+            &self.key_val[usize::from(self.key_len)..usize::from(self.key_len + self.val_len)];
+        unsafe { core::mem::transmute(val) }
     }
 
     pub fn len(&self) -> usize {
@@ -57,13 +60,12 @@ impl Entry {
 
     /// # SAFETY
     /// `val` *must* fit into `self.key_val`.
-    pub unsafe fn set_val(&mut self, val: &[u8]) {
+    pub unsafe fn set_val<V>(&mut self, val: V)
+    where
+        V: Encodable,
+    {
         let key_len: usize = self.key_len.into();
-        self.val_len = val.len().into();
-        core::ptr::copy_nonoverlapping(
-            val.as_ptr(),
-            self.key_val.as_mut_ptr().add(key_len),
-            val.len(),
-        );
+        self.val_len = val.value_size().into();
+        val.write_value(&mut self.key_val[key_len..]);
     }
 }

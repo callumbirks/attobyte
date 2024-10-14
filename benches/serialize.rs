@@ -24,7 +24,7 @@ fn atto_serialize(c: &mut Criterion) {
             let mut tree = Tree::new();
 
             for (key, val) in keys.iter().zip(values.iter()) {
-                tree.insert(key.as_bytes(), val.as_bytes());
+                tree.insert(key, val.as_str());
             }
 
             let mut vec = tree.finish_vec();
@@ -32,8 +32,8 @@ fn atto_serialize(c: &mut Criterion) {
             let mut tree = Tree::from_bytes_mut(&mut vec).unwrap();
 
             for (key, val) in keys.iter().zip(values.iter().rev()) {
-                tree.insert(key.as_bytes(), val.as_bytes());
-                let _ = tree.get(key.as_bytes());
+                tree.insert(key, val.as_str());
+                let _ = tree.get(key);
             }
 
             tree.finish().unwrap();
@@ -45,22 +45,22 @@ fn btreemap_json_serialize(c: &mut Criterion) {
     let keys: Vec<String> = std::iter::repeat_with(random_word).take(KV_COUNT).collect();
     let values: Vec<String> = std::iter::repeat_with(random_word).take(KV_COUNT).collect();
 
-    let str_to_box_bytes = |str: &str| str.as_bytes().to_vec().into_boxed_slice();
+    let str_to_box = |str: &str| str.to_string().into_boxed_str();
 
     c.bench_function("serialize/btreemap_json", |b| {
         b.iter(|| {
-            let mut tree: BTreeMap<Box<str>, Box<[u8]>> = BTreeMap::new();
+            let mut tree: BTreeMap<Box<str>, Box<str>> = BTreeMap::new();
 
             for (key, val) in keys.iter().zip(values.iter()) {
-                tree.insert(key.clone().into_boxed_str(), str_to_box_bytes(&val));
+                tree.insert(str_to_box(key), str_to_box(&val));
             }
 
             let vec = serde_json::to_vec(&tree).unwrap();
 
-            let mut tree: BTreeMap<Box<str>, Box<[u8]>> = serde_json::from_slice(&vec).unwrap();
+            let mut tree: BTreeMap<Box<str>, Box<str>> = serde_json::from_slice(&vec).unwrap();
 
             for (key, val) in keys.iter().zip(values.iter().rev()) {
-                tree.insert(key.clone().into_boxed_str(), str_to_box_bytes(&val));
+                tree.insert(str_to_box(key), str_to_box(&val));
                 let _ = tree.get(key.as_str());
             }
 

@@ -30,20 +30,20 @@ fn atto_insert_update(c: &mut Criterion) {
             let mut tree = Tree::new();
 
             for (key, value) in keys.iter().zip(values.iter()) {
-                tree.insert(key.as_bytes(), value.as_bytes());
-                let _ = tree.get(key.as_bytes());
+                tree.insert(key, value.as_str());
+                let _ = tree.get(key);
             }
             for (key, value) in keys.iter().zip(values.iter().rev()) {
-                tree.insert(key.as_bytes(), value.as_bytes());
-                let _ = tree.get(key.as_bytes());
+                tree.insert(key, value.as_str());
+                let _ = tree.get(key);
             }
             for key in &deleted_keys {
-                tree.remove(key.as_bytes());
-                tree.get(key.as_bytes());
+                tree.remove(key);
+                let _ = tree.get(key);
             }
             for (key, val) in deleted_keys.iter().zip(values.iter().take(DELETIONS_COUNT)) {
-                tree.insert(key.as_bytes(), val.as_bytes());
-                let _ = tree.get(key.as_bytes());
+                tree.insert(key, val.as_str());
+                let _ = tree.get(key);
             }
         });
     });
@@ -57,26 +57,26 @@ fn std_insert_update(c: &mut Criterion) {
         .map(Clone::clone)
         .collect();
 
-    let str_to_box_bytes = |str: &str| str.as_bytes().to_vec().into_boxed_slice();
+    let str_to_box = |str: &str| str.to_string().into_boxed_str();
 
     c.bench_function("insert_update/std_btreemap", |b| {
         b.iter(|| {
-            let mut tree: BTreeMap<Box<[u8]>, Box<[u8]>> = BTreeMap::new();
+            let mut tree: BTreeMap<Box<str>, Box<str>> = BTreeMap::new();
 
             for (key, value) in keys.iter().zip(values.iter()) {
-                tree.insert(str_to_box_bytes(&key), str_to_box_bytes(&value));
-                let _ = tree.get(key.as_bytes());
+                tree.insert(str_to_box(&key), str_to_box(&value));
+                let _ = tree.get(key.as_str());
             }
             for (key, value) in keys.iter().zip(values.iter().rev()) {
-                tree.insert(str_to_box_bytes(&key), str_to_box_bytes(&value));
-                let _ = tree.get(key.as_bytes());
+                tree.insert(str_to_box(&key), str_to_box(&value));
+                let _ = tree.get(key.as_str());
             }
             for key in &deleted_keys {
-                tree.remove(key.as_bytes());
+                tree.remove(key.as_str());
             }
             for (key, val) in deleted_keys.iter().zip(values.iter().take(DELETIONS_COUNT)) {
-                tree.insert(str_to_box_bytes(&key), str_to_box_bytes(&val));
-                let _ = tree.get(key.as_bytes());
+                tree.insert(str_to_box(&key), str_to_box(&val));
+                let _ = tree.get(key.as_str());
             }
         });
     });

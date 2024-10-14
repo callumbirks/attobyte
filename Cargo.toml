@@ -12,6 +12,7 @@ criterion = "0.5.1"
 rand = "0.8.5"
 serde = { version = "1.0.210", features = ["derive"] }
 serde_json = "1.0.128"
+stats_alloc = "0.1.10"
 
 [profile.bench]
 opt-level = 2

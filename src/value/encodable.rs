@@ -40,14 +40,14 @@ impl Encodable for bool {
     }
 }
 
-int_impl!(unsigned u8, tag::UINT);
-int_impl!(unsigned u16, tag::UINT);
-int_impl!(unsigned u32, tag::UINT);
-int_impl!(unsigned u64, tag::UINT);
-int_impl!(signed i8, tag::INT);
-int_impl!(signed i16, tag::INT);
-int_impl!(signed i32, tag::INT);
-int_impl!(signed i64, tag::INT);
+int_impl!(unsigned u8, extra_tag::UNSIGNED);
+int_impl!(unsigned u16, extra_tag::UNSIGNED);
+int_impl!(unsigned u32, extra_tag::UNSIGNED);
+int_impl!(unsigned u64, extra_tag::UNSIGNED);
+int_impl!(signed i8, extra_tag::SIGNED);
+int_impl!(signed i16, extra_tag::SIGNED);
+int_impl!(signed i32, extra_tag::SIGNED);
+int_impl!(signed i64, extra_tag::SIGNED);
 
 impl private::Sealed for f32 {}
 impl Encodable for f32 {
@@ -163,7 +163,7 @@ mod macros {
         (_WV $ty:ty, $tag:expr) => {
             fn write_value(&self, buf: &mut [u8]) {
                 let byte_count = self.value_size() - 1;
-                buf[0] = $tag | (byte_count as u8 - 1);
+                buf[0] = super::tag::INT | $tag | (byte_count as u8 - 1);
                 buf[1..=byte_count].copy_from_slice(&self.to_le_bytes()[..byte_count]);
             }
         };

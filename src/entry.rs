@@ -65,7 +65,8 @@ impl Entry {
         V: Encodable,
     {
         let key_len: usize = self.key_len.into();
-        self.val_len = val.value_size().into();
-        val.write_value(&mut self.key_val[key_len..]);
+        let val_len: usize = val.value_size();
+        self.val_len = val_len.into();
+        val.write_value(&mut self.key_val[key_len..key_len + val_len]);
     }
 }

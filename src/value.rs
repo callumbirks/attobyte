@@ -2,6 +2,8 @@ use core::fmt;
 
 use macros::{get_int, impl_partialeq, impl_try_from_value};
 
+use crate::U24;
+
 mod encodable;
 
 #[repr(transparent)]
@@ -29,6 +31,10 @@ pub enum ValueType {
     String,
     // 1 bytes + len
     Bytes,
+    // 1 byte + U24 ( 3 bytes )
+    ArrayOffset,
+    // 1 byte + U24 ( 3 bytes )
+    TreeOffset,
 }
 
 pub(crate) mod private {
@@ -174,6 +180,16 @@ impl Value {
         }
     }
 
+    pub(crate) fn get_offset(&self) -> Option<U24> {
+        match self.value_type() {
+            ValueType::ArrayOffset | ValueType::TreeOffset => {
+                let buf = [self.0[1], self.0[2], self.0[3]];
+                Some(U24(buf))
+            }
+            _ => None,
+        }
+    }
+
     fn _get_bytes(&self) -> &[u8] {
         debug_assert!(matches!(
             self.value_type(),
@@ -233,23 +249,26 @@ impl Eq for &Value {}
 mod tag {
     pub const NULL: u8 = 0x00;
     pub const BOOL: u8 = 0x10;
-    pub const FLOAT: u8 = 0x30;
-    pub const INT: u8 = 0x40;
-    pub const UINT: u8 = 0x60;
-    pub const BYTES: u8 = 0x80;
-    pub const STRING: u8 = 0xC0;
+    pub const FLOAT: u8 = 0x20;
+    pub const INT: u8 = 0x30;
+    pub const BYTES: u8 = 0x40;
+    pub const STRING: u8 = 0x50;
+    pub const OFFSET: u8 = 0x80;
 }
 
 mod extra_tag {
     pub const FALSE: u8 = 0x00;
     pub const TRUE: u8 = 0x01;
     pub const DOUBLE: u8 = 0x01;
+    pub const SIGNED: u8 = 0x00;
+    pub const UNSIGNED: u8 = 0x08;
+    pub const _ARRAY: u8 = 0x00;
+    pub const TREE: u8 = 0x01;
 }
 
 impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let value_type = self.value_type();
-        match value_type {
+        match self.value_type() {
             ValueType::Null => write!(f, "Null"),
             ValueType::False => write!(f, "False"),
             ValueType::True => write!(f, "True"),
@@ -261,6 +280,12 @@ impl fmt::Debug for Value {
             ValueType::Float64 => write!(f, "f64 {}", unsafe { self.as_f64().unwrap_unchecked() }),
             ValueType::String => write!(f, "\"{}\"", unsafe { self.as_str().unwrap_unchecked() }),
             ValueType::Bytes => write!(f, "{:?}", unsafe { self.as_bytes().unwrap_unchecked() }),
+            ValueType::ArrayOffset => write!(f, "ArrayOffset {}", unsafe {
+                self.get_offset().unwrap_unchecked()
+            }),
+            ValueType::TreeOffset => write!(f, "TreeOffset {}", unsafe {
+                self.get_offset().unwrap_unchecked()
+            }),
         }
     }
 }
@@ -280,10 +305,16 @@ impl ValueType {
                 extra_tag::DOUBLE => Some(ValueType::Float64),
                 _ => Some(ValueType::Float32),
             },
-            tag::INT => Some(ValueType::Int),
-            tag::UINT => Some(ValueType::UnsignedInt),
+            tag::INT => match byte & 0x08 {
+                extra_tag::UNSIGNED => Some(ValueType::UnsignedInt),
+                _ => Some(ValueType::Int),
+            },
             tag::STRING => Some(ValueType::String),
             tag::BYTES => Some(ValueType::Bytes),
+            tag::OFFSET => match byte & 0x0F {
+                extra_tag::TREE => Some(ValueType::TreeOffset),
+                _ => Some(ValueType::ArrayOffset),
+            },
             _ => None,
         }
     }
@@ -301,6 +332,8 @@ impl ValueType {
             ValueType::Float64 => 1,
             ValueType::String => 2,
             ValueType::Bytes => 2,
+            ValueType::ArrayOffset => 1,
+            ValueType::TreeOffset => 1,
         }
     }
 
@@ -323,6 +356,7 @@ impl ValueType {
                 buf[0] &= 0x0F;
                 u16::from_be_bytes(buf) as usize + 1
             }
+            ValueType::ArrayOffset | ValueType::TreeOffset => 4,
         }
     }
 }

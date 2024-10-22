@@ -3,6 +3,7 @@ extern crate std;
 mod mem;
 
 use super::*;
+use alloc::collections::BTreeSet;
 use rand::distributions::{self, Distribution};
 use rand::seq::SliceRandom;
 use rand::{distributions::Alphanumeric, Rng};
@@ -163,7 +164,11 @@ fn random_value() -> TypedValue {
 
 #[test]
 fn insert_update_remove() {
-    let keys: Vec<String> = std::iter::repeat_with(random_word).take(KV_COUNT).collect();
+    let keys: Vec<String> = std::iter::repeat_with(random_word)
+        .take(KV_COUNT)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
     let values: Vec<TypedValue> = std::iter::repeat_with(random_value)
         .take(KV_COUNT)
         .collect();
@@ -182,9 +187,8 @@ fn insert_update_remove() {
         assert!(tree.get(key).is_some_and(|v| val == &v));
     }
 
-    let deleted_keys: Vec<String> = keys
+    let deleted_keys: Vec<&String> = keys
         .choose_multiple(&mut rand::thread_rng(), DELETION_COUNT)
-        .map(Clone::clone)
         .collect();
 
     // Delete some keys
@@ -198,8 +202,6 @@ fn insert_update_remove() {
         tree.insert(key, val);
         assert!(tree.get(key).is_some_and(|v| val == &v));
     }
-
-    println!("Tree: {tree:#?}");
 }
 
 #[test]

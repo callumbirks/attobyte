@@ -1,3 +1,4 @@
+#[allow(unused_macros)]
 macro_rules! debugprint {
     ($($arg:tt)*) => {
         #[cfg(test)]
@@ -14,4 +15,5 @@ macro_rules! byte_slice {
 }
 
 pub(crate) use byte_slice;
+#[allow(unused_imports)]
 pub(crate) use debugprint;

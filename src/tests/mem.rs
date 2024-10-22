@@ -9,6 +9,9 @@ use super::{random_word, DELETION_COUNT, KV_COUNT};
 #[global_allocator]
 static GLOBAL: &StatsAlloc<std::alloc::System> = &INSTRUMENTED_SYSTEM;
 
+// This test should only be run on its own.
+// Use `cargo test memory_usage -- --ignored --nocapture` to test the output.
+#[ignore]
 #[test]
 fn memory_usage() {
     let keys: Vec<String> = std::iter::repeat_with(random_word).take(KV_COUNT).collect();
